@@ -1,0 +1,97 @@
+[
+  {
+    "id": "027117a1-f48d-400d-ba2f-886e2a96ec5c",
+    "createdAt": "2026-04-06T03:17:59.752Z",
+    "updatedAt": "2026-04-06T03:20:30.755Z",
+    "completedAt": "2026-04-06T03:20:30.753Z",
+    "source": "ui",
+    "text": "If you’re in no contact with someone right now and you cannot stop thinking about their silence, this reading is for you.\r\n\r\nMaybe you had a huge fight and blocked each other.\r\nMaybe it turned into a cold war and nobody reached out.\r\nOr maybe it was the worst kind of ending. No big argument. No clear goodbye. Just two people fading out of each other’s lives.\r\n\r\nAnd that kind of silence can mess with you.\r\n\r\nBecause it leaves you in limbo.\r\nNot together.\r\nNot fully done.\r\nJust stuck in the middle, replaying everything.",
+    "sentenceCount": 9,
+    "processedCount": 9,
+    "status": "success",
+    "jobDir": "tts-workflow/jobs/20260406031759633_027117a1",
+    "promptPath": "tts-workflow/jobs/20260406031759633_027117a1/refs/prompt_ref.mp3",
+    "promptFilename": "prompt_ref.mp3",
+    "emotionPath": "tts-workflow/jobs/20260406031759633_027117a1/refs/emotion_ref.wav",
+    "emotionFilename": "emotion_ref.wav",
+    "emoWeight": 0.8,
+    "baseUrl": "http://localhost:7860/",
+    "mergedPath": "tts-workflow/jobs/20260406031759633_027117a1/merged.wav",
+    "mergedFilename": "merged.wav",
+    "mergedUrl": "/sandbox/file?path=tts-workflow%2Fjobs%2F20260406031759633_027117a1%2Fmerged.wav&t=1775445630753",
+    "segments": [
+      {
+        "index": 1,
+        "text": "If you’re in no contact with someone right now and you cannot stop thinking about their silence,this reading is for you.",
+        "filename": "segment_001.wav",
+        "path": "tts-workflow/jobs/20260406031759633_027117a1/segments/segment_001.wav",
+        "url": "/sandbox/file?path=tts-workflow%2Fjobs%2F20260406031759633_027117a1%2Fsegments%2Fsegment_001.wav&t=1775445504375",
+        "size": 342572
+      },
+      {
+        "index": 2,
+        "text": "Maybe you had a huge fight and blocked each other.",
+        "filename": "segment_002.wav",
+        "path": "tts-workflow/jobs/20260406031759633_027117a1/segments/segment_002.wav",
+        "url": "/sandbox/file?path=tts-workflow%2Fjobs%2F20260406031759633_027117a1%2Fsegments%2Fsegment_002.wav&t=1775445518911",
+        "size": 174124
+      },
+      {
+        "index": 3,
+        "text": "Maybe it turned into a cold war and nobody reached out.",
+        "filename": "segment_003.wav",
+        "path": "tts-workflow/jobs/20260406031759633_027117a1/segments/segment_003.wav",
+        "url": "/sandbox/file?path=tts-workflow%2Fjobs%2F20260406031759633_027117a1%2Fsegments%2Fsegment_003.wav&t=1775445535103",
+        "size": 210476
+      },
+      {
+        "index": 4,
+        "text": "Or maybe it was the worst kind of ending. No big argument. No clear goodbye. Just two people fading out of each other’s lives.",
+        "filename": "segment_004.wav",
+        "path": "tts-workflow/jobs/20260406031759633_027117a1/segments/segment_004.wav",
+        "url": "/sandbox/file?path=tts-workflow%2Fjobs%2F20260406031759633_027117a1%2Fsegments%2Fsegment_004.wav&t=1775445565887",
+        "size": 423468
+      },
+      {
+        "index": 5,
+        "text": "And that kind of silence can mess with you.",
+        "filename": "segment_005.wav",
+        "path": "tts-workflow/jobs/20260406031759633_027117a1/segments/segment_005.wav",
+        "url": "/sandbox/file?path=tts-workflow%2Fjobs%2F20260406031759633_027117a1%2Fsegments%2Fsegment_005.wav&t=1775445583159",
+        "size": 203308
+      },
+      {
+        "index": 6,
+        "text": "Because it leaves you in limbo.",
+        "filename": "segment_006.wav",
+        "path": "tts-workflow/jobs/20260406031759633_027117a1/segments/segment_006.wav",
+        "url": "/sandbox/file?path=tts-workflow%2Fjobs%2F20260406031759633_027117a1%2Fsegments%2Fsegment_006.wav&t=1775445596745",
+        "size": 151084
+      },
+      {
+        "index": 7,
+        "text": "Not together.",
+        "filename": "segment_007.wav",
+        "path": "tts-workflow/jobs/20260406031759633_027117a1/segments/segment_007.wav",
+        "url": "/sandbox/file?path=tts-workflow%2Fjobs%2F20260406031759633_027117a1%2Fsegments%2Fsegment_007.wav&t=1775445605899",
+        "size": 74796
+      },
+      {
+        "index": 8,
+        "text": "Not fully done.",
+        "filename": "segment_008.wav",
+        "path": "tts-workflow/jobs/20260406031759633_027117a1/segments/segment_008.wav",
+        "url": "/sandbox/file?path=tts-workflow%2Fjobs%2F20260406031759633_027117a1%2Fsegments%2Fsegment_008.wav&t=1775445614976",
+        "size": 74796
+      },
+      {
+        "index": 9,
+        "text": "Just stuck in the middle, replaying everything.",
+        "filename": "segment_009.wav",
+        "path": "tts-workflow/jobs/20260406031759633_027117a1/segments/segment_009.wav",
+        "url": "/sandbox/file?path=tts-workflow%2Fjobs%2F20260406031759633_027117a1%2Fsegments%2Fsegment_009.wav&t=1775445630515",
+        "size": 178732
+      }
+    ]
+  }
+]
