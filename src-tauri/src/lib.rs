@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use system::fs::{delete_record, read_history, save_history, update_record, HistoryRecord, Segment};
-use system::sentence::split_text_to_sentences;
+use system::sentence::split_text_to_sentences_with_pause;
 use tauri::{AppHandle, Manager};
 
 fn app_storage_root(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -99,11 +99,11 @@ fn segment_output_path(job_dir: &Path, index: usize) -> PathBuf {
     job_dir.join(segment_filename(index))
 }
 
-fn build_segments(sentences: &[String]) -> Vec<Segment> {
+fn build_segments(sentences: &[(String, u32)]) -> Vec<Segment> {
     sentences
         .iter()
         .enumerate()
-        .map(|(idx, text)| Segment {
+        .map(|(idx, (text, pause_after_ms))| Segment {
             index: idx + 1,
             text: text.clone(),
             filename: segment_filename(idx + 1),
@@ -112,6 +112,7 @@ fn build_segments(sentences: &[String]) -> Vec<Segment> {
             size: 0,
             status: "queued".to_string(),
             error: None,
+            pause_after_ms: *pause_after_ms,
         })
         .collect()
 }
@@ -287,22 +288,20 @@ fn merge_record_segments(record: &mut HistoryRecord, job_dir: &Path) -> Result<(
     let mut ordered_segments = record.segments.clone();
     ordered_segments.sort_by_key(|segment| segment.index);
 
-    let segment_paths = ordered_segments
+    let segment_inputs: Vec<(String, u32)> = ordered_segments
         .iter()
         .filter(|segment| segment.status == "success" && !segment.path.is_empty())
-        .map(|segment| segment.path.as_str())
-        .collect::<Vec<_>>();
+        .map(|segment| (segment.path.clone(), segment.pause_after_ms))
+        .collect();
 
-    if segment_paths.len() != record.segments.len() {
+    if segment_inputs.len() != record.segments.len() {
         return Err("还有句子未成功生成，暂时无法合并。".to_string());
     }
 
     let merged_path = job_dir.join("merged.wav");
-    let list_file = job_dir.join("concat_list.txt");
-    ffmpeg::merge_audio(
-        segment_paths,
+    ffmpeg::merge_audio_with_pauses(
+        &segment_inputs,
         merged_path.to_string_lossy().as_ref(),
-        list_file.to_string_lossy().as_ref(),
     )
     .map_err(|e| format!("Merge Error: {}", e))?;
 
@@ -468,7 +467,7 @@ async fn generate_tts(
     let db_path = history_db_path(&app_handle)?;
     migrate_legacy_storage(&app_handle, &db_path)?;
 
-    let sentences = split_text_to_sentences(&text, 120);
+    let sentences = split_text_to_sentences_with_pause(&text, 120);
     if sentences.is_empty() {
         return Err("没有可生成的句子。".to_string());
     }
@@ -705,6 +704,43 @@ async fn update_segment_text(
 }
 
 #[tauri::command]
+async fn update_segment_pause(
+    app_handle: AppHandle,
+    id: String,
+    index: usize,
+    pause_ms: u32,
+) -> Result<(), String> {
+    let db_path = history_db_path(&app_handle)?;
+    migrate_legacy_storage(&app_handle, &db_path)?;
+
+    let mut record = load_record(&db_path, &id)?;
+    if record.status == "processing" {
+        return Err("当前任务还在生成中，暂时不能修改停顿。".to_string());
+    }
+
+    let job_dir = infer_job_dir(&record)
+        .or_else(|| record.job_dir.as_ref().map(PathBuf::from))
+        .ok_or_else(|| "无法定位该任务的音频目录。".to_string())?;
+
+    let segment = record
+        .segments
+        .iter_mut()
+        .find(|segment| segment.index == index)
+        .ok_or_else(|| format!("Segment {} not found", index))?;
+
+    let clamped = pause_ms.min(5000);
+    if segment.pause_after_ms == clamped {
+        return Ok(());
+    }
+    segment.pause_after_ms = clamped;
+
+    invalidate_merged_artifacts(&mut record, &job_dir);
+    finalize_record(&mut record, &job_dir);
+    update_record(&db_path, &id, record);
+    Ok(())
+}
+
+#[tauri::command]
 async fn delete_history(app_handle: AppHandle, id: String) -> Result<(), String> {
     let db_path = history_db_path(&app_handle)?;
     migrate_legacy_storage(&app_handle, &db_path)?;
@@ -764,6 +800,41 @@ async fn extract_video_audio(app_handle: AppHandle, video_path: String) -> Resul
 }
 
 #[tauri::command]
+async fn remerge_record(app_handle: AppHandle, id: String) -> Result<(), String> {
+    let db_path = history_db_path(&app_handle)?;
+    migrate_legacy_storage(&app_handle, &db_path)?;
+
+    let mut record = load_record(&db_path, &id)?;
+    if record.status == "processing" {
+        return Err("当前任务还在生成中，稍后再合并。".to_string());
+    }
+    let job_dir = infer_job_dir(&record)
+        .or_else(|| record.job_dir.as_ref().map(PathBuf::from))
+        .ok_or_else(|| "无法定位该任务的音频目录。".to_string())?;
+
+    invalidate_merged_artifacts(&mut record, &job_dir);
+    match merge_record_segments(&mut record, &job_dir) {
+        Ok(()) => {
+            record.status = "success".to_string();
+            record.error = None;
+        }
+        Err(error) => {
+            record.status = "failed".to_string();
+            record.error = Some(error.clone());
+            update_record(&db_path, &id, record);
+            return Err(error);
+        }
+    }
+    update_record(&db_path, &id, record);
+    Ok(())
+}
+
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    Path::new(&path).is_file()
+}
+
+#[tauri::command]
 async fn export_audio(source_path: String, destination_path: String) -> Result<(), String> {
     let source = PathBuf::from(&source_path);
     if !source.exists() {
@@ -810,10 +881,13 @@ pub fn run() {
             generate_tts,
             retry_segment,
             update_segment_text,
+            update_segment_pause,
             delete_history,
             control_task,
             extract_video_audio,
-            export_audio
+            export_audio,
+            path_exists,
+            remerge_record
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

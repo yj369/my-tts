@@ -19,6 +19,8 @@ pub struct Segment {
     pub status: String,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(rename = "pauseAfterMs", default)]
+    pub pause_after_ms: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
