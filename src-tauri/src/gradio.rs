@@ -12,32 +12,123 @@ fn label_cache() -> &'static Mutex<Option<String>> {
     EMOTION_MODE_LABEL.get_or_init(|| Mutex::new(None))
 }
 
-/// Pick the choice that means "use emotion reference audio" — works for both
-/// English ("Use emotion reference audio") and Chinese ("使用情感参考音频")
-/// IndexTTS WebUI builds.
+/// One choice from a Gradio Radio. The choices array can be a flat list of
+/// strings, or a list of `[label, value]` pairs — we capture the *value*
+/// (what gets sent back to the server), since that's what `gen_single`
+/// expects.
+fn extract_choice_value(v: &Value) -> Option<String> {
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(arr) = v.as_array() {
+        // [label, value] — value is the second element when present, label first.
+        if arr.len() >= 2 {
+            if let Some(s) = arr[1].as_str() {
+                return Some(s.to_string());
+            }
+        }
+        if let Some(s) = arr.first().and_then(|x| x.as_str()) {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+fn looks_like_emotion_ref(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    let has_emotion_word =
+        lower.contains("emotion") || lower.contains("emo") || s.contains("情感") || s.contains("情绪");
+    let has_ref_word =
+        lower.contains("reference") || lower.contains("ref") || s.contains("参考");
+    let is_vector = lower.contains("vector") || s.contains("向量");
+    let is_same_as = lower.contains("same as") || s.contains("相同") || s.contains("一致");
+    has_emotion_word && has_ref_word && !is_vector && !is_same_as
+}
+
 fn pick_emotion_label(choices: &[Value]) -> Option<String> {
-    let strings: Vec<String> = choices
+    let strings: Vec<String> = choices.iter().filter_map(extract_choice_value).collect();
+    if strings.is_empty() {
+        return None;
+    }
+    strings
         .iter()
-        .filter_map(|v| {
-            if let Some(s) = v.as_str() {
-                Some(s.to_string())
-            } else if let Some(arr) = v.as_array() {
-                arr.iter().find_map(|x| x.as_str().map(|s| s.to_string()))
+        .find(|s| looks_like_emotion_ref(s))
+        .cloned()
+        // Fallback: middle option of a 3-radio (IndexTTS layout: [same-as, emotion-ref, vector])
+        .or_else(|| {
+            if strings.len() == 3 {
+                Some(strings[1].clone())
             } else {
                 None
             }
         })
-        .collect();
+}
 
-    // Prefer the "emotion reference audio" option, avoiding "same as prompt" and "vector".
-    strings
-        .iter()
-        .find(|s| {
-            (s.contains("emotion") && s.contains("reference"))
-                || (s.contains("情感") && s.contains("参考"))
-        })
-        .cloned()
-        .or_else(|| strings.into_iter().nth(1))
+/// Walk the Gradio /config JSON looking for any Radio component whose choices
+/// look like the emotion-mode picker, and return its winning value.
+fn find_emotion_label_in_config(v: &Value) -> Option<String> {
+    if let Some(obj) = v.as_object() {
+        // Gradio /config: { components: [ { type: "radio", props: { choices: [...] } }, ... ] }
+        let is_radio = obj
+            .get("type")
+            .and_then(|t| t.as_str())
+            .map(|t| t.eq_ignore_ascii_case("radio"))
+            .unwrap_or(false);
+
+        if is_radio {
+            let choices = obj
+                .get("props")
+                .and_then(|p| p.get("choices"))
+                .and_then(|c| c.as_array())
+                .or_else(|| obj.get("choices").and_then(|c| c.as_array()));
+            if let Some(choices) = choices {
+                if let Some(label) = pick_emotion_label(choices) {
+                    if looks_like_emotion_ref(&label) {
+                        return Some(label);
+                    }
+                }
+            }
+        }
+
+        for (_, child) in obj {
+            if let Some(found) = find_emotion_label_in_config(child) {
+                return Some(found);
+            }
+        }
+    } else if let Some(arr) = v.as_array() {
+        for child in arr {
+            if let Some(found) = find_emotion_label_in_config(child) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+async fn fetch_gradio_config(client: &Client) -> Result<Value, String> {
+    let urls = [
+        "http://127.0.0.1:7860/gradio_api/config",
+        "http://127.0.0.1:7860/config",
+    ];
+    let mut last_err = String::new();
+    for url in urls {
+        match client.get(url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    match serde_json::from_str::<Value>(&text) {
+                        Ok(v) => return Ok(v),
+                        Err(e) => last_err = format!("{} parse: {}", url, e),
+                    }
+                } else {
+                    last_err = format!("{} HTTP {}: {}", url, status, summarize_body(&text));
+                }
+            }
+            Err(e) => last_err = format!("{}: {}", url, e),
+        }
+    }
+    Err(last_err)
 }
 
 async fn resolve_emotion_label(client: &Client) -> Result<String, String> {
@@ -49,50 +140,28 @@ async fn resolve_emotion_label(client: &Client) -> Result<String, String> {
         }
     }
 
-    let body = client
-        .get(GRADIO_INFO_URL)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
-        .map_err(|e| e.to_string())?;
+    let label = match fetch_gradio_config(client).await {
+        Ok(cfg) => find_emotion_label_in_config(&cfg),
+        Err(_) => None,
+    };
 
-    let info: Value = serde_json::from_str(&body)
-        .map_err(|e| format!("info parse: {}: {}", e, summarize_body(&body)))?;
-
-    // Walk the info JSON looking for any "choices" array containing the emotion options.
-    fn walk(v: &Value) -> Option<String> {
-        if let Some(obj) = v.as_object() {
-            if let Some(choices) = obj.get("choices").and_then(|c| c.as_array()) {
-                if let Some(label) = pick_emotion_label(choices) {
-                    if label.contains("情感") || label.to_lowercase().contains("emotion") {
-                        return Some(label);
-                    }
-                }
-            }
-            for (_, child) in obj {
-                if let Some(found) = walk(child) {
-                    return Some(found);
-                }
-            }
-        } else if let Some(arr) = v.as_array() {
-            for child in arr {
-                if let Some(found) = walk(child) {
-                    return Some(found);
-                }
-            }
-        }
-        None
-    }
-
-    let label = walk(&info).ok_or_else(|| {
-        "Could not find emotion-mode Radio choices in /gradio_api/info".to_string()
-    })?;
+    // Last-resort fallback: try the two most common literal labels we know IndexTTS ships.
+    // gen_single will reject the wrong one and the user can retry.
+    let label = label
+        .or_else(|| Some("使用情感参考音频".to_string()))
+        .unwrap();
 
     let mut guard = cache.lock().await;
     *guard = Some(label.clone());
     Ok(label)
+}
+
+/// Drop the cached emotion label so the next generation re-resolves it.
+/// Called whenever a generation fails with the Radio "not in list of choices"
+/// error, so a stale cached value can be replaced.
+async fn invalidate_emotion_label() {
+    let mut guard = label_cache().lock().await;
+    *guard = None;
 }
 
 const GRADIO_BASE_URL: &str = "http://127.0.0.1:7860";
@@ -105,11 +174,21 @@ const REQUEST_RETRY_COUNT: usize = 3;
 const READY_RETRY_DELAY_MS: u64 = 1000;
 const REQUEST_RETRY_DELAY_MS: u64 = 1200;
 
+static SHARED_CLIENT: OnceLock<Client> = OnceLock::new();
+
 fn build_client() -> Result<Client, String> {
-    Client::builder()
+    if let Some(c) = SHARED_CLIENT.get() {
+        return Ok(c.clone());
+    }
+    let client = Client::builder()
         .timeout(Duration::from_secs(300))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(4)
+        .tcp_keepalive(Duration::from_secs(60))
         .build()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let _ = SHARED_CLIENT.set(client.clone());
+    Ok(client)
 }
 
 fn summarize_body(body: &str) -> String {
@@ -357,6 +436,9 @@ pub async fn generate_single(
                 break;
             }
         } else if chunk_str.contains("event: error") {
+            // The cached emotion label may be stale (e.g. user re-launched IndexTTS
+            // with a different language). Drop it so the next call re-resolves.
+            invalidate_emotion_label().await;
             return Err(format!(
                 "Gradio Processing Error encountered in stream: {}",
                 chunk_str

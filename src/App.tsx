@@ -499,8 +499,11 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [isServerLive, setIsServerLive] = useState<boolean | null>(null);
 
-  // 轮询服务器状态
+  // 轮询服务器状态：低频 + 仅在窗口可见时轮询，避免对 IndexTTS 频繁建连
+  // (Windows 上 Python ProactorEventLoop 对每次 client close 都会喷 WinError 10054)
   useEffect(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+
     const checkStatus = async () => {
       try {
         const live: boolean = await invoke("is_server_live");
@@ -509,9 +512,29 @@ export default function App() {
         setIsServerLive(false);
       }
     };
-    checkStatus();
-    const timer = setInterval(checkStatus, 5000);
-    return () => clearInterval(timer);
+
+    const start = () => {
+      if (timer) return;
+      checkStatus();
+      timer = setInterval(checkStatus, 20000);
+    };
+    const stop = () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+
+    onVisibility();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      stop();
+    };
   }, []);
 
   // 本地拆句预览（生成前的草稿队列）
