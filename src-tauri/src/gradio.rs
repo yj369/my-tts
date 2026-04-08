@@ -1,8 +1,99 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::sleep;
+
+static EMOTION_MODE_LABEL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn label_cache() -> &'static Mutex<Option<String>> {
+    EMOTION_MODE_LABEL.get_or_init(|| Mutex::new(None))
+}
+
+/// Pick the choice that means "use emotion reference audio" — works for both
+/// English ("Use emotion reference audio") and Chinese ("使用情感参考音频")
+/// IndexTTS WebUI builds.
+fn pick_emotion_label(choices: &[Value]) -> Option<String> {
+    let strings: Vec<String> = choices
+        .iter()
+        .filter_map(|v| {
+            if let Some(s) = v.as_str() {
+                Some(s.to_string())
+            } else if let Some(arr) = v.as_array() {
+                arr.iter().find_map(|x| x.as_str().map(|s| s.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Prefer the "emotion reference audio" option, avoiding "same as prompt" and "vector".
+    strings
+        .iter()
+        .find(|s| {
+            (s.contains("emotion") && s.contains("reference"))
+                || (s.contains("情感") && s.contains("参考"))
+        })
+        .cloned()
+        .or_else(|| strings.into_iter().nth(1))
+}
+
+async fn resolve_emotion_label(client: &Client) -> Result<String, String> {
+    let cache = label_cache();
+    {
+        let guard = cache.lock().await;
+        if let Some(v) = guard.as_ref() {
+            return Ok(v.clone());
+        }
+    }
+
+    let body = client
+        .get(GRADIO_INFO_URL)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .text()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let info: Value = serde_json::from_str(&body)
+        .map_err(|e| format!("info parse: {}: {}", e, summarize_body(&body)))?;
+
+    // Walk the info JSON looking for any "choices" array containing the emotion options.
+    fn walk(v: &Value) -> Option<String> {
+        if let Some(obj) = v.as_object() {
+            if let Some(choices) = obj.get("choices").and_then(|c| c.as_array()) {
+                if let Some(label) = pick_emotion_label(choices) {
+                    if label.contains("情感") || label.to_lowercase().contains("emotion") {
+                        return Some(label);
+                    }
+                }
+            }
+            for (_, child) in obj {
+                if let Some(found) = walk(child) {
+                    return Some(found);
+                }
+            }
+        } else if let Some(arr) = v.as_array() {
+            for child in arr {
+                if let Some(found) = walk(child) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    let label = walk(&info).ok_or_else(|| {
+        "Could not find emotion-mode Radio choices in /gradio_api/info".to_string()
+    })?;
+
+    let mut guard = cache.lock().await;
+    *guard = Some(label.clone());
+    Ok(label)
+}
 
 const GRADIO_BASE_URL: &str = "http://127.0.0.1:7860";
 const GRADIO_INFO_URL: &str = "http://127.0.0.1:7860/gradio_api/info";
@@ -164,10 +255,11 @@ pub async fn generate_single(
 
     let uploaded_prompt = upload_file(&client, prompt).await?;
     let uploaded_emotion = upload_file(&client, emotion).await?;
+    let emotion_label = resolve_emotion_label(&client).await?;
 
     let payload = json!({
         "data": [
-            "Use emotion reference audio",
+            emotion_label,
             {"path": uploaded_prompt, "meta": {"_type": "gradio.FileData"}},    // parameter 1: prompt audio
             text,                      // param 2: text
             {"path": uploaded_emotion, "meta": {"_type": "gradio.FileData"}},   // param 3: emotion audio
