@@ -863,6 +863,41 @@ async fn export_audio(source_path: String, destination_path: String) -> Result<(
     Ok(())
 }
 
+#[tauri::command]
+async fn is_server_live() -> bool {
+    gradio::is_server_live().await
+}
+
+#[tauri::command]
+async fn audio_to_video(app_handle: AppHandle, audio_path: String, image_path: String) -> Result<String, String> {
+    let out_dir = tmp_root(&app_handle)?;
+    let out_path = out_dir.join(format!(
+        "av_{}.mp4",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
+    ));
+    let out_path_str = out_path.to_str().unwrap().to_string();
+
+    ffmpeg::audio_to_video(&audio_path, &image_path, &out_path_str)
+        .map_err(|e| format!("FFmpeg Error: {}", e))?;
+
+    Ok(out_path_str)
+}
+
+#[tauri::command]
+async fn extract_subtitles(app_handle: AppHandle, video_path: String) -> Result<String, String> {
+    let out_dir = tmp_root(&app_handle)?;
+    let out_path = out_dir.join(format!(
+        "subs_{}.srt",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
+    ));
+    let out_path_str = out_path.to_str().unwrap().to_string();
+
+    ffmpeg::extract_subtitles(&video_path, &out_path_str)
+        .map_err(|e| format!("FFmpeg Error: {}", e))?;
+
+    Ok(out_path_str)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -887,7 +922,10 @@ pub fn run() {
             extract_video_audio,
             export_audio,
             path_exists,
-            remerge_record
+            remerge_record,
+            is_server_live,
+            audio_to_video,
+            extract_subtitles
         ])
         .plugin(tauri_plugin_dialog::init())
         .run(tauri::generate_context!())

@@ -12,7 +12,7 @@ import {
   MoreHorizontal,
   Pause,
   Play,
-  Plus,
+  LayoutGrid,
   RotateCcw,
   Scissors,
   Search,
@@ -74,15 +74,9 @@ const WORKFLOWS: WorkflowItem[] = [
   },
   {
     title: "字幕提取",
-    subtitle: "拆句、打轴、句子清洗",
+    subtitle: "从视频提取内置 SRT 字幕流",
     icon: Captions,
     glow: "from-emerald-500/15 to-teal-500/5",
-  },
-  {
-    title: "音频裁切",
-    subtitle: "片段提取、静音移除、头尾修整",
-    icon: Scissors,
-    glow: "from-amber-500/15 to-orange-500/5",
   },
 ];
 
@@ -170,16 +164,102 @@ function SectionTitle({
   );
 }
 
+const resolveAssetUrl = (url?: string, path?: string) => {
+  const target = path || url;
+  if (!target) return null;
+  try {
+    return convertFileSrc(target);
+  } catch {
+    return target;
+  }
+};
+const formatTime = (value?: string) => {
+  if (!value) return "-";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : `${date.getMonth() + 1}月${date.getDate()}日 ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+};
+const displayFilename = (path: string | null, placeholder: string) => path ? path.split(/[\\/]/).pop() : placeholder;
+
 function WorkflowModal({
-  open,
+  isOpen,
   onClose,
+  activeWorkflow,
+  setActiveWorkflow,
 }: {
-  open: boolean;
+  isOpen: boolean;
   onClose: () => void;
+  activeWorkflow: string | null;
+  setActiveWorkflow: (v: string | null) => void;
 }) {
+  const [selectedTool, setSelectedTool] = useState<string | null>(null);
+  const [v2aFile, setV2aFile] = useState<string | null>(null);
+  const [a2vAudio, setA2vAudio] = useState<string | null>(null);
+  const [a2vImage, setA2vImage] = useState<string | null>(null);
+  const [subsFile, setSubsFile] = useState<string | null>(null);
+  
+  const [resultMsg, setResultMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  // 每次重置
+  useEffect(() => {
+    if (!isOpen) {
+      setSelectedTool(null);
+      setV2aFile(null);
+      setA2vAudio(null);
+      setA2vImage(null);
+      setSubsFile(null);
+      setResultMsg(null);
+    }
+  }, [isOpen]);
+
+  const handleV2A = async () => {
+    if (!v2aFile) return;
+    setIsProcessing(true);
+    setResultMsg(null);
+    try {
+      const tmp: string = await invoke("extract_video_audio", { videoPath: v2aFile });
+      const target = await save({ title: "保存音频", defaultPath: "extracted.wav", filters: [{ name: "音频", extensions: ["wav"] }] });
+      if (target) {
+        await invoke("export_audio", { sourcePath: tmp, destinationPath: target });
+        setResultMsg({ type: "success", text: "音频提取并保存成功！" });
+      }
+    } catch (e) { setResultMsg({ type: "error", text: String(e) }); }
+    finally { setIsProcessing(false); }
+  };
+
+  const handleA2V = async () => {
+    if (!a2vAudio || !a2vImage) return;
+    setIsProcessing(true);
+    setResultMsg(null);
+    try {
+      const tmp: string = await invoke("audio_to_video", { audioPath: a2vAudio, imagePath: a2vImage });
+      const target = await save({ title: "保存视频", defaultPath: "generated_video.mp4", filters: [{ name: "视频", extensions: ["mp4"] }] });
+      if (target) {
+        await invoke("export_audio", { sourcePath: tmp, destinationPath: target });
+        setResultMsg({ type: "success", text: "视频合成并保存成功！" });
+      }
+    } catch (e) { setResultMsg({ type: "error", text: String(e) }); }
+    finally { setIsProcessing(false); }
+  };
+
+  const handleSubs = async () => {
+    if (!subsFile) return;
+    setIsProcessing(true);
+    setResultMsg(null);
+    try {
+      const tmp: string = await invoke("extract_subtitles", { videoPath: subsFile });
+      const target = await save({ title: "保存字幕", defaultPath: "subtitle.srt", filters: [{ name: "字幕", extensions: ["srt"] }] });
+      if (target) {
+        await invoke("export_audio", { sourcePath: tmp, destinationPath: target });
+        setResultMsg({ type: "success", text: "字幕提取成功！" });
+      }
+    } catch (e) { setResultMsg({ type: "error", text: String(e) }); }
+    finally { setIsProcessing(false); }
+  };
+
   return (
     <AnimatePresence>
-      {open ? (
+      {isOpen ? (
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -190,80 +270,160 @@ function WorkflowModal({
             initial={{ opacity: 0, y: 10, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.98 }}
-            transition={{ duration: 0.18, ease: "easeOut" }}
             className="w-full max-w-4xl overflow-hidden rounded-[32px] border border-white/70 bg-white shadow-[0_30px_120px_rgba(15,23,42,0.18)]"
           >
-            <div className="border-b border-slate-100 px-6 py-5">
-              <div className="flex items-start justify-between gap-4">
+            {/* Header */}
+            <div className="border-b border-slate-100 px-8 py-6 flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                {selectedTool && (
+                  <button onClick={() => setSelectedTool(null)} className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 transition">
+                    <SkipBack className="h-5 w-5" />
+                  </button>
+                )}
                 <div>
-                  <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
-                    Workflow Hub
-                  </div>
-                  <h2 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">
-                    工作流工具箱
+                  <h2 className="text-2xl font-semibold text-slate-900">
+                    {selectedTool || "工作流工具箱"}
                   </h2>
-                  <p className="mt-2 text-sm leading-6 text-slate-500">
-                    次级能力、扩展工具、未来新增功能都放这里，不挤占主工作区。
+                  <p className="text-sm text-slate-500 mt-1">
+                    {selectedTool ? "按照步骤完成操作" : "FFmpeg 强力驱动的媒体处理套件"}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-50 hover:text-slate-800"
-                  aria-label="关闭工作流工具箱"
-                >
-                  <X className="h-5 w-5" />
-                </button>
               </div>
+              <button onClick={onClose} disabled={isProcessing} className="flex h-11 w-11 items-center justify-center rounded-2xl border border-slate-200 text-slate-500 hover:bg-slate-50 disabled:opacity-30">
+                <X className="h-5 w-5" />
+              </button>
             </div>
 
-            <div className="max-h-[70vh] overflow-auto px-6 py-6">
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                {WORKFLOWS.map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <button
-                      key={item.title}
-                      type="button"
-                      className="group relative overflow-hidden rounded-[28px] border border-slate-200 bg-white p-5 text-left shadow-sm transition hover:shadow-lg"
-                    >
-                      <div
-                        className={cn(
-                          "absolute inset-0 bg-gradient-to-br opacity-70 transition group-hover:opacity-90",
-                          item.glow
-                        )}
-                      />
-                      <div className="relative flex items-start gap-4">
-                        <div className="flex h-14 w-14 items-center justify-center rounded-3xl bg-slate-950 text-white shadow-lg shadow-slate-300">
-                          <Icon className="h-6 w-6" />
+            {/* Content Area */}
+            <div className="min-h-[460px] max-h-[70vh] overflow-auto p-8 bg-slate-50/50">
+              {resultMsg && (
+                <div className={cn("mb-6 rounded-2xl border p-4 text-sm font-medium", resultMsg.type === "success" ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-rose-200 bg-rose-50 text-rose-700")}>
+                  {resultMsg.text}
+                </div>
+              )}
+
+              {!selectedTool ? (
+                <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+                  {WORKFLOWS.map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <button
+                        key={item.title}
+                        onClick={() => setSelectedTool(item.title)}
+                        className="group relative flex flex-col items-center rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm transition hover:border-violet-300 hover:shadow-xl hover:-translate-y-1"
+                      >
+                        <div className={cn("absolute inset-0 bg-gradient-to-br opacity-5 group-hover:opacity-10 rounded-3xl", item.glow)} />
+                        <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-3xl bg-slate-950 text-white shadow-lg">
+                          <Icon className="h-10 w-10" />
                         </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="text-lg font-semibold text-slate-900">{item.title}</div>
-                            <ChevronRight className="h-5 w-5 text-slate-400 transition group-hover:translate-x-0.5" />
-                          </div>
-                          <div className="mt-2 text-sm leading-6 text-slate-600">{item.subtitle}</div>
+                        <h3 className="text-lg font-bold text-slate-900">{item.title}</h3>
+                        <p className="mt-3 text-sm leading-relaxed text-slate-500">{item.subtitle}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="mx-auto max-w-2xl">
+                  {/* Video to Audio Page */}
+                  {selectedTool === "视频转音频" && (
+                    <div className="space-y-6">
+                      <div 
+                        onClick={async () => {
+                          const file = await open({ filters: [{ name: "视频", extensions: ["mp4", "mkv", "avi", "mov"] }] });
+                          if (file && typeof file === "string") setV2aFile(file);
+                        }}
+                        className={cn("flex flex-col items-center justify-center rounded-[32px] border-2 border-dashed p-12 transition-all cursor-pointer", v2aFile ? "border-violet-200 bg-violet-50/30" : "border-slate-200 bg-white hover:border-violet-300 hover:bg-slate-50")}
+                      >
+                        <div className="flex h-20 w-20 items-center justify-center rounded-full bg-slate-100 text-slate-400 mb-4">
+                          <Video className="h-10 w-10" />
+                        </div>
+                        <div className="text-center">
+                          <p className="text-lg font-semibold text-slate-900">{v2aFile ? v2aFile.split(/[\\/]/).pop() : "选择源视频文件"}</p>
+                          <p className="text-sm text-slate-500 mt-2">{v2aFile ? "已选择视频，准备提取" : "支持 MP4, MKV, AVI, MOV"}</p>
                         </div>
                       </div>
-                    </button>
-                  );
-                })}
+                      <button
+                        onClick={handleV2A}
+                        disabled={!v2aFile || isProcessing}
+                        className={cn("w-full py-5 rounded-[24px] text-lg font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3", (!v2aFile || isProcessing) ? "bg-slate-300" : "bg-slate-950 hover:bg-slate-900 hover:-translate-y-1")}
+                      >
+                        {isProcessing ? <Loader2 className="h-6 w-6 animate-spin" /> : <FileAudio className="h-6 w-6" />}
+                        立即提取音频
+                      </button>
+                    </div>
+                  )}
 
-                <button
-                  type="button"
-                  className="flex min-h-[196px] items-center justify-center rounded-[28px] border border-dashed border-slate-300 bg-slate-50 p-5 text-center transition hover:border-violet-300 hover:bg-violet-50"
-                >
-                  <div>
-                    <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-3xl bg-white shadow-sm">
-                      <Plus className="h-6 w-6 text-slate-500" />
+                  {/* Audio to Video Page */}
+                  {selectedTool === "音频转视频" && (
+                    <div className="space-y-6">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div 
+                          onClick={async () => {
+                            const file = await open({ filters: [{ name: "音频", extensions: ["mp3", "wav", "aac"] }] });
+                            if (file && typeof file === "string") setA2vAudio(file);
+                          }}
+                          className={cn("p-8 rounded-[28px] border-2 border-dashed text-center cursor-pointer transition-all", a2vAudio ? "border-violet-200 bg-violet-50/30" : "border-slate-200 bg-white hover:border-violet-300")}
+                        >
+                          <Mic2 className="h-8 w-8 mx-auto mb-3 text-slate-400" />
+                          <div className="text-sm font-bold text-slate-900 truncate">{a2vAudio ? a2vAudio.split(/[\\/]/).pop() : "选择音频"}</div>
+                        </div>
+                        <div 
+                          onClick={async () => {
+                            const file = await open({ filters: [{ name: "图片", extensions: ["jpg", "png", "webp"] }] });
+                            if (file && typeof file === "string") setA2vImage(file);
+                          }}
+                          className={cn("p-8 rounded-[28px] border-2 border-dashed text-center cursor-pointer transition-all", a2vImage ? "border-violet-200 bg-violet-50/30" : "border-slate-200 bg-white hover:border-violet-300")}
+                        >
+                          <FileAudio className="h-8 w-8 mx-auto mb-3 text-slate-400" />
+                          <div className="text-sm font-bold text-slate-900 truncate">{a2vImage ? a2vImage.split(/[\\/]/).pop() : "选择背景图"}</div>
+                        </div>
+                      </div>
+                      
+                      {a2vAudio && a2vImage && (
+                        <div className="p-4 rounded-2xl bg-slate-900 text-white text-xs font-mono">
+                          准备合成: {a2vAudio.split(/[\\/]/).pop()} + {a2vImage.split(/[\\/]/).pop()}
+                        </div>
+                      )}
+
+                      <button
+                        onClick={handleA2V}
+                        disabled={!a2vAudio || !a2vImage || isProcessing}
+                        className={cn("w-full py-5 rounded-[24px] text-lg font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3", (!a2vAudio || !a2vImage || isProcessing) ? "bg-slate-300" : "bg-violet-600 hover:bg-violet-700 hover:-translate-y-1")}
+                      >
+                        {isProcessing ? <Loader2 className="h-6 w-6 animate-spin" /> : <Video className="h-6 w-6" />}
+                        合成视频
+                      </button>
                     </div>
-                    <div className="mt-4 text-lg font-semibold text-slate-900">新增工具入口</div>
-                    <div className="mt-2 text-sm leading-6 text-slate-500">
-                      后续能力继续往这里长，不污染主页面布局。
+                  )}
+
+                  {/* Subtitle Page */}
+                  {selectedTool === "字幕提取" && (
+                    <div className="space-y-6">
+                      <div 
+                        onClick={async () => {
+                          const file = await open({ filters: [{ name: "视频", extensions: ["mp4", "mkv"] }] });
+                          if (file && typeof file === "string") setSubsFile(file);
+                        }}
+                        className={cn("flex flex-col items-center justify-center rounded-[32px] border-2 border-dashed p-12 transition-all cursor-pointer", subsFile ? "border-teal-200 bg-teal-50/30" : "border-slate-200 bg-white hover:border-teal-300 hover:bg-slate-50")}
+                      >
+                        <Captions className="h-10 w-10 text-slate-400 mb-4" />
+                        <div className="text-center">
+                          <p className="text-lg font-semibold text-slate-900">{subsFile ? subsFile.split(/[\\/]/).pop() : "选择待提取视频"}</p>
+                          <p className="text-sm text-slate-500 mt-2">尝试提取视频内置的 SRT 字幕流</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleSubs}
+                        disabled={!subsFile || isProcessing}
+                        className={cn("w-full py-5 rounded-[24px] text-lg font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3", (!subsFile || isProcessing) ? "bg-slate-300" : "bg-teal-600 hover:bg-teal-700")}
+                      >
+                        {isProcessing ? <Loader2 className="h-6 w-6 animate-spin" /> : <SkipForward className="h-6 w-6" />}
+                        开始扫描字幕
+                      </button>
                     </div>
-                  </div>
-                </button>
-              </div>
+                  )}
+                </div>
+              )}
             </div>
           </motion.div>
         </motion.div>
@@ -296,22 +456,6 @@ function WaveBars() {
     </div>
   );
 }
-
-const resolveAssetUrl = (url?: string, path?: string) => {
-  const target = path || url;
-  if (!target) return null;
-  try {
-    return convertFileSrc(target);
-  } catch {
-    return target;
-  }
-};
-const formatTime = (value?: string) => {
-  if (!value) return "-";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : `${date.getMonth() + 1}月${date.getDate()}日 ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
-};
-const displayFilename = (path: string | null, placeholder: string) => path ? path.split(/[\\/]/).pop() : placeholder;
 
 export default function App() {
   // --- 状态管理 ---
@@ -351,7 +495,24 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [focusTaskId, setFocusTaskId] = useState<string | null>(null);
   const [isWorkflowModalOpen, setIsWorkflowModalOpen] = useState<boolean>(false);
+  const [activeWorkflow, setActiveWorkflow] = useState<string | null>(null); // 新增：当前正在运行的任务名
   const [submitting, setSubmitting] = useState(false);
+  const [isServerLive, setIsServerLive] = useState<boolean | null>(null);
+
+  // 轮询服务器状态
+  useEffect(() => {
+    const checkStatus = async () => {
+      try {
+        const live: boolean = await invoke("is_server_live");
+        setIsServerLive(live);
+      } catch (err) {
+        setIsServerLive(false);
+      }
+    };
+    checkStatus();
+    const timer = setInterval(checkStatus, 5000);
+    return () => clearInterval(timer);
+  }, []);
 
   // 本地拆句预览（生成前的草稿队列）
   const [previewChunks, setPreviewChunks] = useState<string[] | null>(null);
@@ -664,8 +825,24 @@ export default function App() {
                   <AudioLines className="h-5 w-5" />
                 </div>
                 <div className="min-w-0">
-                  <h1 className="text-[22px] font-semibold tracking-[-0.04em] text-slate-950">
+                  <h1 className="text-[22px] font-semibold tracking-[-0.04em] text-slate-950 flex items-center gap-3">
                     TTS 工作台
+                    <span className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-all duration-500",
+                      isServerLive === true ? "border-emerald-200 bg-emerald-50 text-emerald-700" :
+                      isServerLive === false ? "border-rose-200 bg-rose-50 text-rose-700" :
+                      "border-slate-200 bg-slate-50 text-slate-500"
+                    )}>
+                      <span className={cn(
+                        "h-1.5 w-1.5 rounded-full",
+                        isServerLive === true ? "bg-emerald-500 animate-pulse" :
+                        isServerLive === false ? "bg-rose-500" :
+                        "bg-slate-300"
+                      )} />
+                      {isServerLive === true ? "IndexTTS 已就绪" :
+                       isServerLive === false ? "IndexTTS 未连接" :
+                       "正在检测 IndexTTS…"}
+                    </span>
                   </h1>
                 </div>
               </div>
@@ -695,18 +872,19 @@ export default function App() {
 
                 <button
                   onClick={handleGenerate}
-                  disabled={submitting || !scriptText || !promptPath || !emotionPath}
+                  disabled={submitting || !scriptText || !promptPath || !emotionPath || isServerLive !== true}
                   type="button"
-                  className={cn("inline-flex h-14 items-center gap-2 rounded-2xl px-6 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(15,23,42,0.16)] transition", (submitting || !scriptText || !promptPath || !emotionPath) ? "bg-slate-300" : "bg-slate-950 hover:bg-slate-900")}
+                  className={cn("inline-flex h-14 items-center gap-2 rounded-2xl px-6 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(15,23,42,0.16)] transition", (submitting || !scriptText || !promptPath || !emotionPath || isServerLive !== true) ? "bg-slate-300" : "bg-slate-950 hover:bg-slate-900")}
                 >
                   {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                  开始生成
+                  {isServerLive === false ? "IndexTTS 未就绪" : "开始生成"}
                 </button>
                 <button
                   onClick={() => setIsWorkflowModalOpen(true)}
                   className="flex h-14 w-14 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-700 shadow-sm hover:bg-slate-50 transition"
+                  title="工作流工具箱"
                 >
-                   <Plus className="h-5 w-5" />
+                   <LayoutGrid className="h-5 w-5" />
                 </button>
               </div>
             </div>
@@ -1113,7 +1291,12 @@ export default function App() {
           </div>
         </div>
       </div>
-      <WorkflowModal open={isWorkflowModalOpen} onClose={() => setIsWorkflowModalOpen(false)} />
+      <WorkflowModal
+        isOpen={isWorkflowModalOpen}
+        onClose={() => setIsWorkflowModalOpen(false)}
+        activeWorkflow={activeWorkflow}
+        setActiveWorkflow={setActiveWorkflow}
+      />
     </div>
   );
 }

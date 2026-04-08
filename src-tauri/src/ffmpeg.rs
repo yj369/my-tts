@@ -189,3 +189,60 @@ pub fn merge_audio(segments: Vec<&str>, output_path: &str, list_file: &str) -> s
     }
     Ok(())
 }
+
+pub fn audio_to_video(audio_path: &str, image_path: &str, output_path: &str) -> std::io::Result<()> {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-loop", "1",
+            "-i", image_path,
+            "-i", audio_path,
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", // 确保宽高是偶数，H.264 必须
+            "-c:v", "libx264",
+            "-tune", "stillimage",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            "-shortest",
+            "-y",
+            "-hide_banner",
+            "-loglevel", "error",
+            output_path,
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "FFmpeg audio-to-video failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub fn extract_subtitles(video_path: &str, output_path: &str) -> std::io::Result<()> {
+    // Try to extract the first subtitle stream to .srt
+    let output = Command::new("ffmpeg")
+        .args([
+            "-i", video_path,
+            "-map", "0:s:0",
+            "-y",
+            "-hide_banner",
+            "-loglevel", "error",
+            output_path,
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "FFmpeg subtitle extraction failed (maybe no subtitle stream found): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        ));
+    }
+    Ok(())
+}

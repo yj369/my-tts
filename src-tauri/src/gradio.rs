@@ -64,6 +64,18 @@ fn parse_upload_body(body: &str) -> Result<String, String> {
     ))
 }
 
+pub async fn is_server_live() -> bool {
+    let client = match build_client() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    match client.get(GRADIO_INFO_URL).timeout(Duration::from_secs(2)).send().await {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
+}
+
 pub async fn ensure_server_ready() -> Result<(), String> {
     let client = build_client()?;
     let mut last_error = String::new();
