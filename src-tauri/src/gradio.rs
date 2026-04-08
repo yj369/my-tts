@@ -350,6 +350,10 @@ pub async fn generate_single(
                 // Take up to next newline
                 let json_str = json_slice.split('\n').next().unwrap_or(json_slice);
                 complete_data = json_str.to_string();
+                // Drain any remaining bytes so the server-side asyncio loop
+                // can close the connection cleanly. On Windows ProactorEventLoop
+                // an abrupt client close emits noisy WinError 10054 / 64 tracebacks.
+                while let Ok(Some(_)) = sse_res.chunk().await {}
                 break;
             }
         } else if chunk_str.contains("event: error") {
