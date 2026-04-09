@@ -36,10 +36,11 @@ fn extract_choice_value(v: &Value) -> Option<String> {
 
 fn looks_like_emotion_ref(s: &str) -> bool {
     let lower = s.to_lowercase();
-    let has_emotion_word =
-        lower.contains("emotion") || lower.contains("emo") || s.contains("情感") || s.contains("情绪");
-    let has_ref_word =
-        lower.contains("reference") || lower.contains("ref") || s.contains("参考");
+    let has_emotion_word = lower.contains("emotion")
+        || lower.contains("emo")
+        || s.contains("情感")
+        || s.contains("情绪");
+    let has_ref_word = lower.contains("reference") || lower.contains("ref") || s.contains("参考");
     let is_vector = lower.contains("vector") || s.contains("向量");
     let is_same_as = lower.contains("same as") || s.contains("相同") || s.contains("一致");
     has_emotion_word && has_ref_word && !is_vector && !is_same_as
@@ -240,7 +241,12 @@ pub async fn is_server_live() -> bool {
         Err(_) => return false,
     };
 
-    match client.get(GRADIO_INFO_URL).timeout(Duration::from_secs(2)).send().await {
+    match client
+        .get(GRADIO_INFO_URL)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+    {
         Ok(response) => response.status().is_success(),
         Err(_) => false,
     }

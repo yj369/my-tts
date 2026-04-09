@@ -6,7 +6,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use system::fs::{delete_record, read_history, save_history, update_record, HistoryRecord, Segment};
+use system::fs::{
+    delete_record, read_history, save_history, update_record, HistoryRecord, Segment,
+};
 use system::sentence::split_text_to_sentences_with_pause;
 use tauri::{AppHandle, Manager};
 
@@ -60,7 +62,9 @@ fn infer_job_dir(record: &HistoryRecord) -> Option<PathBuf> {
 
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("Failed to create {}: {}", dst.display(), e))?;
-    for entry in fs::read_dir(src).map_err(|e| format!("Failed to read {}: {}", src.display(), e))? {
+    for entry in
+        fs::read_dir(src).map_err(|e| format!("Failed to read {}: {}", src.display(), e))?
+    {
         let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
@@ -136,10 +140,7 @@ fn failed_segment_summary(record: &HistoryRecord) -> Option<String> {
     if failed_indexes.is_empty() {
         None
     } else if failed_indexes.len() == 1 {
-        Some(format!(
-            "第 {} 句生成失败，可单独重试。",
-            failed_indexes[0]
-        ))
+        Some(format!("第 {} 句生成失败，可单独重试。", failed_indexes[0]))
     } else {
         Some(format!(
             "第 {} 句生成失败，可单独重试。",
@@ -264,8 +265,13 @@ fn queue_segment_for_regeneration(
 
 fn move_generated_file(output_path: &str, dest_path: &Path) -> Result<String, String> {
     if dest_path.exists() {
-        fs::remove_file(dest_path)
-            .map_err(|e| format!("Failed to replace existing segment {}: {}", dest_path.display(), e))?;
+        fs::remove_file(dest_path).map_err(|e| {
+            format!(
+                "Failed to replace existing segment {}: {}",
+                dest_path.display(),
+                e
+            )
+        })?;
     }
 
     if let Err(rename_error) = fs::rename(output_path, dest_path) {
@@ -299,11 +305,8 @@ fn merge_record_segments(record: &mut HistoryRecord, job_dir: &Path) -> Result<(
     }
 
     let merged_path = job_dir.join("merged.wav");
-    ffmpeg::merge_audio_with_pauses(
-        &segment_inputs,
-        merged_path.to_string_lossy().as_ref(),
-    )
-    .map_err(|e| format!("Merge Error: {}", e))?;
+    ffmpeg::merge_audio_with_pauses(&segment_inputs, merged_path.to_string_lossy().as_ref())
+        .map_err(|e| format!("Merge Error: {}", e))?;
 
     let absolute_merged_path = canonical_path_string(&merged_path);
     record.status = "success".to_string();
@@ -362,7 +365,10 @@ fn remap_record_to_job_dir(mut record: HistoryRecord, job_dir: &Path) -> History
     for segment in &mut record.segments {
         let file_name = if !segment.filename.is_empty() {
             segment.filename.clone()
-        } else if let Some(file_name) = Path::new(&segment.path).file_name().and_then(|value| value.to_str()) {
+        } else if let Some(file_name) = Path::new(&segment.path)
+            .file_name()
+            .and_then(|value| value.to_str())
+        {
             file_name.to_string()
         } else {
             segment_filename(segment.index)
@@ -398,7 +404,10 @@ fn migrate_legacy_storage(app_handle: &AppHandle, db_path: &Path) -> Result<(), 
     }
 
     let mut records = read_history(db_path);
-    let mut known_ids = records.iter().map(|record| record.id.clone()).collect::<HashSet<_>>();
+    let mut known_ids = records
+        .iter()
+        .map(|record| record.id.clone())
+        .collect::<HashSet<_>>();
     let legacy_records = read_history(&legacy_db_path);
     if legacy_records.is_empty() {
         return Ok(());
@@ -414,7 +423,10 @@ fn migrate_legacy_storage(app_handle: &AppHandle, db_path: &Path) -> Result<(), 
 
         let target_job_dir = jobs_dir.join(&legacy_record.id);
         if let Some(source_job_dir) = infer_job_dir(&legacy_record) {
-            if source_job_dir.exists() && source_job_dir != target_job_dir && !target_job_dir.exists() {
+            if source_job_dir.exists()
+                && source_job_dir != target_job_dir
+                && !target_job_dir.exists()
+            {
                 copy_dir_all(&source_job_dir, &target_job_dir)?;
             }
         }
@@ -538,7 +550,9 @@ async fn generate_tts(
                 .map(|segment| segment.text.clone())
                 .unwrap_or_default();
 
-            match gradio::generate_single(&segment_text, &prompt_path, &emotion_path, emo_weight).await {
+            match gradio::generate_single(&segment_text, &prompt_path, &emotion_path, emo_weight)
+                .await
+            {
                 Ok(output_path) => {
                     let dest_path = segment_output_path(&job_dir_clone, segment_index);
                     match move_generated_file(&output_path, &dest_path) {
@@ -611,8 +625,13 @@ async fn retry_segment(app_handle: AppHandle, id: String, index: usize) -> Resul
         return Err(format!("情绪参考文件不存在: {}", emotion_path));
     }
 
-    fs::create_dir_all(&job_dir)
-        .map_err(|e| format!("Failed to create job directory {}: {}", job_dir.display(), e))?;
+    fs::create_dir_all(&job_dir).map_err(|e| {
+        format!(
+            "Failed to create job directory {}: {}",
+            job_dir.display(),
+            e
+        )
+    })?;
 
     set_segment_processing(&mut record, index)?;
     update_record(&db_path, &id, record.clone());
@@ -634,7 +653,8 @@ async fn retry_segment(app_handle: AppHandle, id: String, index: usize) -> Resul
             return;
         }
 
-        match gradio::generate_single(&segment_text, &prompt_path, &emotion_path, emo_weight).await {
+        match gradio::generate_single(&segment_text, &prompt_path, &emotion_path, emo_weight).await
+        {
             Ok(output_path) => {
                 let dest_path = segment_output_path(&job_dir_clone, index);
                 match move_generated_file(&output_path, &dest_path) {
@@ -754,8 +774,9 @@ async fn delete_history(app_handle: AppHandle, id: String) -> Result<(), String>
     if let Some(record) = delete_record(&db_path, &id) {
         if let Some(job_dir) = infer_job_dir(&record) {
             if job_dir.exists() {
-                fs::remove_dir_all(&job_dir)
-                    .map_err(|e| format!("Failed to remove job data {}: {}", job_dir.display(), e))?;
+                fs::remove_dir_all(&job_dir).map_err(|e| {
+                    format!("Failed to remove job data {}: {}", job_dir.display(), e)
+                })?;
             }
         }
     }
@@ -794,7 +815,8 @@ async fn extract_video_audio(app_handle: AppHandle, video_path: String) -> Resul
     ));
     let out_path_str = out_path.to_str().unwrap().to_string();
 
-    ffmpeg::extract_audio(&video_path, &out_path_str).map_err(|e| format!("FFmpeg Error: {}", e))?;
+    ffmpeg::extract_audio(&video_path, &out_path_str)
+        .map_err(|e| format!("FFmpeg Error: {}", e))?;
 
     Ok(out_path_str)
 }
@@ -843,8 +865,13 @@ async fn export_audio(source_path: String, destination_path: String) -> Result<(
 
     let destination = PathBuf::from(&destination_path);
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create export directory {}: {}", parent.display(), e))?;
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create export directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
     }
 
     if source == destination {
@@ -869,11 +896,18 @@ async fn is_server_live() -> bool {
 }
 
 #[tauri::command]
-async fn audio_to_video(app_handle: AppHandle, audio_path: String, image_path: String) -> Result<String, String> {
+async fn audio_to_video(
+    app_handle: AppHandle,
+    audio_path: String,
+    image_path: String,
+) -> Result<String, String> {
     let out_dir = tmp_root(&app_handle)?;
     let out_path = out_dir.join(format!(
         "av_{}.mp4",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
     ));
     let out_path_str = out_path.to_str().unwrap().to_string();
 
@@ -888,7 +922,10 @@ async fn extract_subtitles(app_handle: AppHandle, video_path: String) -> Result<
     let out_dir = tmp_root(&app_handle)?;
     let out_path = out_dir.join(format!(
         "subs_{}.srt",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
     ));
     let out_path_str = out_path.to_str().unwrap().to_string();
 
