@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -16,24 +17,39 @@ fn ffmpeg_command_failed(action: &str, stderr: &[u8]) -> io::Error {
     ))
 }
 
+fn ffmpeg_binary() -> OsString {
+    std::env::var_os("FFMPEG_PATH").unwrap_or_else(|| OsString::from("ffmpeg"))
+}
+
+fn run_ffmpeg(args: &[&str]) -> io::Result<std::process::Output> {
+    Command::new(ffmpeg_binary()).args(args).output().map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "ffmpeg executable was not found. Install FFmpeg and add it to PATH, or set FFMPEG_PATH to the full ffmpeg.exe path.",
+            )
+        } else {
+            error
+        }
+    })
+}
+
 fn normalize_audio_for_concat(input_path: &str, output_path: &Path) -> io::Result<()> {
-    let output = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            input_path,
-            "-c:a",
-            "pcm_s16le",
-            "-ar",
-            "48000",
-            "-ac",
-            "1",
-            output_path.to_string_lossy().as_ref(),
-        ])
-        .output()?;
+    let output = run_ffmpeg(&[
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        input_path,
+        "-c:a",
+        "pcm_s16le",
+        "-ar",
+        "48000",
+        "-ac",
+        "1",
+        output_path.to_string_lossy().as_ref(),
+    ])?;
 
     if !output.status.success() {
         return Err(ffmpeg_command_failed("normalization", &output.stderr));
@@ -103,23 +119,21 @@ fn merge_audio_files(segments: &[PathBuf], output_path: &str, list_file: &Path) 
     }
     fs::write(list_file, concat_content)?;
 
-    let output = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            list_file.to_string_lossy().as_ref(),
-            "-c",
-            "copy",
-            output_path,
-        ])
-        .output()?;
+    let output = run_ffmpeg(&[
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        list_file.to_string_lossy().as_ref(),
+        "-c",
+        "copy",
+        output_path,
+    ])?;
 
     if !output.status.success() {
         return Err(ffmpeg_command_failed("merge", &output.stderr));
@@ -188,24 +202,22 @@ pub fn merge_audio_with_pauses(segments: &[(String, u32)], output_path: &str) ->
 }
 
 pub fn extract_audio(video_path: &str, output_path: &str) -> std::io::Result<()> {
-    let output = Command::new("ffmpeg")
-        .args([
-            "-i",
-            video_path,
-            "-vn",
-            "-acodec",
-            "pcm_s16le",
-            "-ar",
-            "44100",
-            "-ac",
-            "1",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            output_path,
-        ])
-        .output()?;
+    let output = run_ffmpeg(&[
+        "-i",
+        video_path,
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "44100",
+        "-ac",
+        "1",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        output_path,
+    ])?;
 
     if !output.status.success() {
         return Err(std::io::Error::new(
@@ -235,34 +247,32 @@ pub fn audio_to_video(
     image_path: &str,
     output_path: &str,
 ) -> std::io::Result<()> {
-    let output = Command::new("ffmpeg")
-        .args([
-            "-loop",
-            "1",
-            "-i",
-            image_path,
-            "-i",
-            audio_path,
-            "-vf",
-            "scale=trunc(iw/2)*2:trunc(ih/2)*2", // 确保宽高是偶数，H.264 必须
-            "-c:v",
-            "libx264",
-            "-tune",
-            "stillimage",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-pix_fmt",
-            "yuv420p",
-            "-shortest",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            output_path,
-        ])
-        .output()?;
+    let output = run_ffmpeg(&[
+        "-loop",
+        "1",
+        "-i",
+        image_path,
+        "-i",
+        audio_path,
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2", // 确保宽高是偶数，H.264 必须
+        "-c:v",
+        "libx264",
+        "-tune",
+        "stillimage",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-pix_fmt",
+        "yuv420p",
+        "-shortest",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        output_path,
+    ])?;
 
     if !output.status.success() {
         return Err(std::io::Error::new(
@@ -278,19 +288,17 @@ pub fn audio_to_video(
 
 pub fn extract_subtitles(video_path: &str, output_path: &str) -> std::io::Result<()> {
     // Try to extract the first subtitle stream to .srt
-    let output = Command::new("ffmpeg")
-        .args([
-            "-i",
-            video_path,
-            "-map",
-            "0:s:0",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            output_path,
-        ])
-        .output()?;
+    let output = run_ffmpeg(&[
+        "-i",
+        video_path,
+        "-map",
+        "0:s:0",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        output_path,
+    ])?;
 
     if !output.status.success() {
         return Err(std::io::Error::new(

@@ -82,6 +82,12 @@ const WORKFLOWS: WorkflowItem[] = [
 
 const AUDIO_BAR_HEIGHTS = [20, 34, 24, 30, 42, 28, 46, 22, 32, 38, 26, 40, 24, 36, 30, 27, 44, 24, 31, 39];
 
+type TauriWindow = Window & { __TAURI_INTERNALS__?: { invoke?: unknown } };
+
+const isTauriRuntime = () =>
+  typeof window !== "undefined" &&
+  typeof (window as TauriWindow).__TAURI_INTERNALS__?.invoke === "function";
+
 export function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
@@ -498,10 +504,13 @@ export default function App() {
   const [activeWorkflow, setActiveWorkflow] = useState<string | null>(null); // 新增：当前正在运行的任务名
   const [submitting, setSubmitting] = useState(false);
   const [isServerLive, setIsServerLive] = useState<boolean | null>(null);
+  const isNativeRuntime = isTauriRuntime();
 
   // 轮询服务器状态：低频 + 仅在窗口可见时轮询，避免对 IndexTTS 频繁建连
   // (Windows 上 Python ProactorEventLoop 对每次 client close 都会喷 WinError 10054)
   useEffect(() => {
+    if (!isNativeRuntime) return;
+
     let timer: ReturnType<typeof setInterval> | null = null;
 
     const checkStatus = async () => {
@@ -535,7 +544,7 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisibility);
       stop();
     };
-  }, []);
+  }, [isNativeRuntime]);
 
   // 本地拆句预览（生成前的草稿队列）
   const [previewChunks, setPreviewChunks] = useState<string[] | null>(null);
@@ -586,6 +595,8 @@ export default function App() {
   const [draftText, setDraftText] = useState<string>("");
   const [draftPause, setDraftPause] = useState<number>(0);
   const [savingEdit, setSavingEdit] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Sentence | null>(null);
+  const [deletingSentence, setDeletingSentence] = useState(false);
 
   const currentRecord = useMemo(() => focusTaskId ? history.find(h => h.id === focusTaskId) || null : history[0] || null, [focusTaskId, history]);
 
@@ -617,6 +628,10 @@ export default function App() {
   }, [currentRecord, previewChunks]);
 
   const fetchHistory = useCallback(async (silent = false) => {
+    if (!isTauriRuntime()) {
+      if (!silent) setHistoryLoading(false);
+      return;
+    }
     if (!silent) setHistoryLoading(true);
     try {
       const records: HistoryRecord[] = await invoke("get_history");
@@ -626,6 +641,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     fetchHistory();
     const timer = setInterval(() => fetchHistory(true), 2000);
     return () => clearInterval(timer);
@@ -636,6 +652,21 @@ export default function App() {
   const scriptSentenceEstimate = estimateSentences(scriptText);
   const doneCount = currentRecord?.processedCount ?? 0;
   const progressPercent = currentRecord ? Math.round((currentRecord.processedCount / currentRecord.sentenceCount) * 100) : 0;
+  const segmentCounts = useMemo(() => {
+    const c = { done: 0, processing: 0, failed: 0, queued: 0 };
+    if (!currentRecord) return c;
+    for (const s of currentRecord.segments) {
+      if (s.status === "success") c.done += 1;
+      else if (s.status === "processing") c.processing += 1;
+      else if (s.status === "failed") c.failed += 1;
+      else c.queued += 1;
+    }
+    return c;
+  }, [currentRecord]);
+  const hasQueuedSegments = Boolean(currentRecord && segmentCounts.queued > 0 && currentRecord.status !== "processing");
+  const canSubmitGeneration = isServerLive === true && (
+    hasQueuedSegments || Boolean(scriptText.trim() && promptPath && emotionPath)
+  );
 
   const editingSentence = useMemo(
     () => sentences.find((item) => item.id === editingId) ?? null,
@@ -688,13 +719,42 @@ export default function App() {
     setEditingId(null);
   };
 
+  const requestDeleteSentence = (sentence: Sentence) => {
+    if (sentence.status === "generating") return;
+    setDeleteTarget(sentence);
+  };
+
+  const handleConfirmDeleteSentence = async () => {
+    if (!currentRecord || !deleteTarget) return;
+    setDeletingSentence(true);
+    try {
+      if (previewingSegment === deleteTarget.id && previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current = null;
+        setPreviewingSegment(null);
+      }
+      await invoke("delete_segment", { id: currentRecord.id, index: deleteTarget.id });
+      if (editingId === deleteTarget.id) setEditingId(null);
+      setDeleteTarget(null);
+      await fetchHistory(true);
+    } catch (err) {
+      alert(String(err));
+    } finally {
+      setDeletingSentence(false);
+    }
+  };
+
   const handleGenerate = async () => {
-    if (!scriptText.trim() || !promptPath || !emotionPath) return;
+    if (!canSubmitGeneration) return;
     setSubmitting(true);
     try {
-      const id: string = await invoke("generate_tts", { text: scriptText, promptPath, emotionPath, emoWeight: emoWeight / 100 });
-      setPreviewChunks(null);
-      setFocusTaskId(id);
+      if (hasQueuedSegments && currentRecord) {
+        await invoke("regenerate_queued_segments", { id: currentRecord.id });
+      } else {
+        const id: string = await invoke("generate_tts", { text: scriptText, promptPath, emotionPath, emoWeight: emoWeight / 100 });
+        setPreviewChunks(null);
+        setFocusTaskId(id);
+      }
       await fetchHistory(true);
     } catch (err) { alert(String(err)); }
     finally { setSubmitting(false); }
@@ -764,18 +824,6 @@ export default function App() {
       alert(String(err));
     }
   };
-
-  const segmentCounts = useMemo(() => {
-    const c = { done: 0, processing: 0, failed: 0, queued: 0 };
-    if (!currentRecord) return c;
-    for (const s of currentRecord.segments) {
-      if (s.status === "success") c.done += 1;
-      else if (s.status === "processing") c.processing += 1;
-      else if (s.status === "failed") c.failed += 1;
-      else c.queued += 1;
-    }
-    return c;
-  }, [currentRecord]);
 
   const handleRemerge = async () => {
     if (!currentRecord) return;
@@ -852,17 +900,20 @@ export default function App() {
                     TTS 工作台
                     <span className={cn(
                       "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-all duration-500",
+                      !isNativeRuntime ? "border-amber-200 bg-amber-50 text-amber-700" :
                       isServerLive === true ? "border-emerald-200 bg-emerald-50 text-emerald-700" :
                       isServerLive === false ? "border-rose-200 bg-rose-50 text-rose-700" :
                       "border-slate-200 bg-slate-50 text-slate-500"
                     )}>
                       <span className={cn(
                         "h-1.5 w-1.5 rounded-full",
+                        !isNativeRuntime ? "bg-amber-500" :
                         isServerLive === true ? "bg-emerald-500 animate-pulse" :
                         isServerLive === false ? "bg-rose-500" :
                         "bg-slate-300"
                       )} />
-                      {isServerLive === true ? "IndexTTS 已就绪" :
+                      {!isNativeRuntime ? "请用桌面端打开" :
+                       isServerLive === true ? "IndexTTS 已就绪" :
                        isServerLive === false ? "IndexTTS 未连接" :
                        "正在检测 IndexTTS…"}
                     </span>
@@ -895,12 +946,12 @@ export default function App() {
 
                 <button
                   onClick={handleGenerate}
-                  disabled={submitting || !scriptText || !promptPath || !emotionPath || isServerLive !== true}
+                  disabled={submitting || !canSubmitGeneration}
                   type="button"
-                  className={cn("inline-flex h-14 items-center gap-2 rounded-2xl px-6 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(15,23,42,0.16)] transition", (submitting || !scriptText || !promptPath || !emotionPath || isServerLive !== true) ? "bg-slate-300" : "bg-slate-950 hover:bg-slate-900")}
+                  className={cn("inline-flex h-14 items-center gap-2 rounded-2xl px-6 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(15,23,42,0.16)] transition", (submitting || !canSubmitGeneration) ? "bg-slate-300" : "bg-slate-950 hover:bg-slate-900")}
                 >
                   {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                  {isServerLive === false ? "IndexTTS 未就绪" : "开始生成"}
+                  {!isNativeRuntime ? "请用桌面端打开" : isServerLive === false ? "IndexTTS 未就绪" : hasQueuedSegments ? `生成待处理 ${segmentCounts.queued}` : "开始生成"}
                 </button>
                 <button
                   onClick={() => setIsWorkflowModalOpen(true)}
@@ -1048,7 +1099,7 @@ export default function App() {
                       <div key={item.id} className={cn("relative border-b border-slate-100 transition", isEditing ? "bg-violet-50/45" : isCurrent ? "bg-amber-50/40" : isFailed ? "bg-rose-50/40" : "bg-white hover:bg-slate-50")}>
                         {isCurrent && <div className="absolute inset-y-0 left-0 w-[3px] animate-pulse bg-amber-400" />}
                         {isFailed && <div className="absolute inset-y-0 left-0 w-[3px] bg-rose-400" />}
-                        <div className={cn("grid items-start gap-3 px-4 py-4 transition-all duration-200 grid-cols-[64px_1fr_120px]")}>
+                        <div className={cn("grid items-start gap-3 px-4 py-4 transition-all duration-200 grid-cols-[64px_1fr_150px]")}>
                           <button type="button" onClick={() => handleSelectSentence(item)} className={cn("pt-1 text-left text-sm font-semibold", isEditing ? "text-violet-500" : isCurrent ? "text-amber-600" : isFailed ? "text-rose-600" : "text-slate-400")}>#{item.id}</button>
                           <div className="min-w-0 pr-2">
                             {isEditing ? (
@@ -1069,6 +1120,7 @@ export default function App() {
                                   <span className="hidden md:inline text-slate-400">·</span>
                                   <span className="hidden md:inline text-slate-400">⌘/Ctrl + Enter 保存，Esc 取消</span>
                                   <div className="ml-auto flex items-center gap-2">
+                                    <button type="button" onClick={() => requestDeleteSentence(item)} className="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50">删除整句</button>
                                     <button type="button" onClick={handleCancelEdit} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50">取消</button>
                                     <button type="button" onClick={handleSaveSentence} disabled={!isDraftDirty || savingEdit} className={cn("rounded-lg px-3 py-1.5 text-xs font-medium transition", isDraftDirty && !savingEdit ? "bg-violet-600 text-white shadow-sm shadow-violet-200 hover:-translate-y-0.5" : "cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400")}>{savingEdit ? "保存中…" : "保存"}</button>
                                   </div>
@@ -1113,6 +1165,14 @@ export default function App() {
                                       <RotateCcw className="h-3 w-3" />
                                     </button>
                                   )}
+                                  <button
+                                    type="button"
+                                    onClick={(e) => { e.stopPropagation(); requestDeleteSentence(item); }}
+                                    className="flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600"
+                                    title="删除这一句"
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </button>
                                   <Badge status={visualStatus} />
                                 </div>
                                 {isFailed && (
@@ -1320,6 +1380,69 @@ export default function App() {
         activeWorkflow={activeWorkflow}
         setActiveWorkflow={setActiveWorkflow}
       />
+      <AnimatePresence>
+        {deleteTarget && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/35 p-6 backdrop-blur-sm"
+            onClick={() => !deletingSentence && setDeleteTarget(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 10, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.98 }}
+              transition={{ duration: 0.16 }}
+              className="w-full max-w-md rounded-[28px] border border-slate-200 bg-white p-5 shadow-[0_24px_70px_rgba(15,23,42,0.22)]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="mb-4 flex items-start justify-between gap-4">
+                <div>
+                  <div className="mb-2 inline-flex h-9 w-9 items-center justify-center rounded-2xl bg-rose-50 text-rose-600">
+                    <Trash2 className="h-4 w-4" />
+                  </div>
+                  <h3 className="text-base font-semibold text-slate-950">删除第 {deleteTarget.id} 句？</h3>
+                  <p className="mt-1 text-sm leading-6 text-slate-500">这会移除该句文本和对应音频，并重新合并剩余内容。</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(null)}
+                  disabled={deletingSentence}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400 transition hover:bg-slate-50 disabled:opacity-50"
+                  title="关闭"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="mb-5 max-h-32 overflow-auto rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-700">
+                {deleteTarget.text}
+              </div>
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(null)}
+                  disabled={deletingSentence}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDeleteSentence}
+                  disabled={deletingSentence}
+                  className="inline-flex items-center gap-2 rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white shadow-sm shadow-rose-200 transition hover:bg-rose-700 disabled:bg-rose-300"
+                >
+                  {deletingSentence && <Loader2 className="h-4 w-4 animate-spin" />}
+                  确认删除
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

@@ -5,12 +5,48 @@ mod system;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use system::fs::{
     delete_record, read_history, save_history, update_record, HistoryRecord, Segment,
 };
 use system::sentence::split_text_to_sentences_with_pause;
 use tauri::{AppHandle, Manager};
+
+static DELETED_RECORD_IDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn deleted_record_ids() -> &'static Mutex<HashSet<String>> {
+    DELETED_RECORD_IDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn mark_record_deleted(id: &str) {
+    if let Ok(mut ids) = deleted_record_ids().lock() {
+        ids.insert(id.to_string());
+    }
+}
+
+fn clear_record_deleted(id: &str) {
+    if let Ok(mut ids) = deleted_record_ids().lock() {
+        ids.remove(id);
+    }
+}
+
+fn is_record_deleted(id: &str) -> bool {
+    deleted_record_ids()
+        .lock()
+        .map(|ids| ids.contains(id))
+        .unwrap_or(false)
+}
+
+fn update_record_if_active(db_path: &Path, id: &str, record: HistoryRecord) -> bool {
+    if is_record_deleted(id) {
+        return false;
+    }
+    update_record(db_path, id, record);
+    true
+}
 
 fn app_storage_root(app_handle: &AppHandle) -> Result<PathBuf, String> {
     let root = app_handle
@@ -101,6 +137,51 @@ fn segment_filename(index: usize) -> String {
 
 fn segment_output_path(job_dir: &Path, index: usize) -> PathBuf {
     job_dir.join(segment_filename(index))
+}
+
+fn retry_file_op<F>(mut op: F) -> std::io::Result<()>
+where
+    F: FnMut() -> std::io::Result<()>,
+{
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match op() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 4 {
+                    thread::sleep(Duration::from_millis(40 * (attempt + 1) as u64));
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::other("file operation failed")))
+}
+
+fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
+    retry_file_op(|| match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    })
+}
+
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if source == destination {
+        return Ok(());
+    }
+    remove_file_if_exists(destination)?;
+    retry_file_op(|| fs::rename(source, destination)).or_else(|rename_error| {
+        fs::copy(source, destination)
+            .and_then(|_| remove_file_if_exists(source))
+            .map(|_| ())
+            .map_err(|copy_error| {
+                std::io::Error::other(format!(
+                    "rename failed: {}; copy fallback failed: {}",
+                    rename_error, copy_error
+                ))
+            })
+    })
 }
 
 fn build_segments(sentences: &[(String, u32)]) -> Vec<Segment> {
@@ -217,14 +298,14 @@ fn invalidate_merged_artifacts(record: &mut HistoryRecord, job_dir: &Path) {
     if let Some(merged_path) = record.merged_path.take() {
         let merged_path_buf = PathBuf::from(&merged_path);
         if merged_path_buf.exists() {
-            let _ = fs::remove_file(&merged_path_buf);
+            let _ = remove_file_if_exists(&merged_path_buf);
         }
     }
     record.merged_url = None;
 
     let concat_list = job_dir.join("concat_list.txt");
     if concat_list.exists() {
-        let _ = fs::remove_file(concat_list);
+        let _ = remove_file_if_exists(&concat_list);
     }
 }
 
@@ -243,7 +324,7 @@ fn queue_segment_for_regeneration(
     if !old_path.is_empty() {
         let old_path_buf = PathBuf::from(&old_path);
         if old_path_buf.exists() {
-            let _ = fs::remove_file(old_path_buf);
+            let _ = remove_file_if_exists(&old_path_buf);
         }
     }
 
@@ -263,29 +344,66 @@ fn queue_segment_for_regeneration(
     Ok(())
 }
 
-fn move_generated_file(output_path: &str, dest_path: &Path) -> Result<String, String> {
-    if dest_path.exists() {
-        fs::remove_file(dest_path).map_err(|e| {
-            format!(
-                "Failed to replace existing segment {}: {}",
-                dest_path.display(),
-                e
-            )
-        })?;
-    }
+fn renumber_segments_and_files(record: &mut HistoryRecord, job_dir: &Path) -> Result<(), String> {
+    for (idx, segment) in record.segments.iter_mut().enumerate() {
+        let next_index = idx + 1;
+        segment.index = next_index;
+        let next_filename = segment_filename(next_index);
 
-    if let Err(rename_error) = fs::rename(output_path, dest_path) {
-        fs::copy(output_path, dest_path)
-            .and_then(|_| fs::remove_file(output_path))
-            .map_err(|copy_error| {
+        if segment.path.is_empty() {
+            segment.filename = next_filename;
+            continue;
+        }
+
+        let current_path = PathBuf::from(&segment.path);
+        let next_path = job_dir.join(&next_filename);
+        segment.filename = next_filename;
+
+        if current_path == next_path {
+            continue;
+        }
+
+        if current_path.exists() {
+            let temp_path = job_dir.join(format!(
+                ".renumber-{}-{}",
+                next_index,
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            replace_file(&current_path, &temp_path).map_err(|error| {
                 format!(
-                    "Failed to move generated file into {}: {} / {}",
-                    dest_path.display(),
-                    rename_error,
-                    copy_error
+                    "Failed to stage segment file {}: {}",
+                    current_path.display(),
+                    error
                 )
             })?;
+            replace_file(&temp_path, &next_path).map_err(|error| {
+                format!(
+                    "Failed to renumber segment file to {}: {}",
+                    next_path.display(),
+                    error
+                )
+            })?;
+        }
+
+        let absolute = canonical_path_string(&next_path);
+        segment.path = absolute.clone();
+        segment.url = absolute;
     }
+
+    Ok(())
+}
+
+fn move_generated_file(output_path: &str, dest_path: &Path) -> Result<String, String> {
+    replace_file(Path::new(output_path), dest_path).map_err(|error| {
+        format!(
+            "Failed to move generated file into {}: {}",
+            dest_path.display(),
+            error
+        )
+    })?;
 
     Ok(canonical_path_string(dest_path))
 }
@@ -513,6 +631,7 @@ async fn generate_tts(
         emotion_path: Some(emotion_path.clone()),
         segments: build_segments(&sentences),
     };
+    clear_record_deleted(&id);
     update_record(&db_path, &id, record.clone());
 
     let id_clone = id.clone();
@@ -523,25 +642,30 @@ async fn generate_tts(
         if let Err(error) = fs::create_dir_all(&job_dir_clone) {
             record.status = "failed".into();
             record.error = Some(format!("Failed to create job directory: {}", error));
-            update_record(&db_path_clone, &id_clone, record);
+            update_record_if_active(&db_path_clone, &id_clone, record);
             return;
         }
 
         if let Err(error) = gradio::ensure_server_ready().await {
             record.status = "failed".into();
             record.error = Some(error);
-            update_record(&db_path_clone, &id_clone, record);
+            update_record_if_active(&db_path_clone, &id_clone, record);
             return;
         }
 
         for segment_index in 1..=sentences.len() {
+            if is_record_deleted(&id_clone) {
+                return;
+            }
             if let Err(error) = set_segment_processing(&mut record, segment_index) {
                 record.status = "failed".into();
                 record.error = Some(error);
-                update_record(&db_path_clone, &id_clone, record);
+                update_record_if_active(&db_path_clone, &id_clone, record);
                 return;
             }
-            update_record(&db_path_clone, &id_clone, record.clone());
+            if !update_record_if_active(&db_path_clone, &id_clone, record.clone()) {
+                return;
+            }
 
             let segment_text = record
                 .segments
@@ -554,6 +678,10 @@ async fn generate_tts(
                 .await
             {
                 Ok(output_path) => {
+                    if is_record_deleted(&id_clone) {
+                        let _ = remove_file_if_exists(Path::new(&output_path));
+                        return;
+                    }
                     let dest_path = segment_output_path(&job_dir_clone, segment_index);
                     match move_generated_file(&output_path, &dest_path) {
                         Ok(absolute_dest_path) => {
@@ -562,7 +690,7 @@ async fn generate_tts(
                             {
                                 record.status = "failed".into();
                                 record.error = Some(error);
-                                update_record(&db_path_clone, &id_clone, record);
+                                update_record_if_active(&db_path_clone, &id_clone, record);
                                 return;
                             }
                         }
@@ -581,7 +709,9 @@ async fn generate_tts(
             }
 
             finalize_record(&mut record, &job_dir_clone);
-            update_record(&db_path_clone, &id_clone, record.clone());
+            if !update_record_if_active(&db_path_clone, &id_clone, record.clone()) {
+                return;
+            }
         }
     });
 
@@ -634,7 +764,9 @@ async fn retry_segment(app_handle: AppHandle, id: String, index: usize) -> Resul
     })?;
 
     set_segment_processing(&mut record, index)?;
-    update_record(&db_path, &id, record.clone());
+    if !update_record_if_active(&db_path, &id, record.clone()) {
+        return Err("该任务已被删除。".to_string());
+    }
 
     let id_clone = id.clone();
     let db_path_clone = db_path.clone();
@@ -649,13 +781,17 @@ async fn retry_segment(app_handle: AppHandle, id: String, index: usize) -> Resul
         if let Err(error) = gradio::ensure_server_ready().await {
             let _ = set_segment_failure(&mut retry_record, index, error);
             finalize_record(&mut retry_record, &job_dir_clone);
-            update_record(&db_path_clone, &id_clone, retry_record);
+            update_record_if_active(&db_path_clone, &id_clone, retry_record);
             return;
         }
 
         match gradio::generate_single(&segment_text, &prompt_path, &emotion_path, emo_weight).await
         {
             Ok(output_path) => {
+                if is_record_deleted(&id_clone) {
+                    let _ = remove_file_if_exists(Path::new(&output_path));
+                    return;
+                }
                 let dest_path = segment_output_path(&job_dir_clone, index);
                 match move_generated_file(&output_path, &dest_path) {
                     Ok(absolute_dest_path) => {
@@ -676,9 +812,167 @@ async fn retry_segment(app_handle: AppHandle, id: String, index: usize) -> Resul
         }
 
         finalize_record(&mut retry_record, &job_dir_clone);
-        update_record(&db_path_clone, &id_clone, retry_record);
+        update_record_if_active(&db_path_clone, &id_clone, retry_record);
     });
 
+    Ok(())
+}
+
+#[tauri::command]
+async fn regenerate_queued_segments(app_handle: AppHandle, id: String) -> Result<(), String> {
+    let db_path = history_db_path(&app_handle)?;
+    migrate_legacy_storage(&app_handle, &db_path)?;
+
+    let mut record = load_record(&db_path, &id)?;
+    if record.status == "processing" {
+        return Err("当前任务还在生成中。".to_string());
+    }
+
+    let queued_segments = record
+        .segments
+        .iter()
+        .filter(|segment| segment.status == "queued")
+        .map(|segment| (segment.index, segment.text.clone()))
+        .collect::<Vec<_>>();
+
+    if queued_segments.is_empty() {
+        return Err("当前任务没有待生成的句子。".to_string());
+    }
+
+    let prompt_path = record
+        .prompt_path
+        .clone()
+        .ok_or_else(|| "缺少原始音色参考路径，无法补生成。".to_string())?;
+    let emotion_path = record
+        .emotion_path
+        .clone()
+        .ok_or_else(|| "缺少原始情绪参考路径，无法补生成。".to_string())?;
+    let emo_weight = record.emo_weight.unwrap_or(1.0);
+    let job_dir = infer_job_dir(&record)
+        .or_else(|| record.job_dir.as_ref().map(PathBuf::from))
+        .ok_or_else(|| "无法定位该任务的音频目录。".to_string())?;
+
+    if !Path::new(&prompt_path).exists() {
+        return Err(format!("音色参考文件不存在: {}", prompt_path));
+    }
+    if !Path::new(&emotion_path).exists() {
+        return Err(format!("情绪参考文件不存在: {}", emotion_path));
+    }
+
+    fs::create_dir_all(&job_dir).map_err(|e| {
+        format!(
+            "Failed to create job directory {}: {}",
+            job_dir.display(),
+            e
+        )
+    })?;
+
+    for (index, _) in &queued_segments {
+        set_segment_processing(&mut record, *index)?;
+    }
+    if !update_record_if_active(&db_path, &id, record.clone()) {
+        return Err("该任务已被删除。".to_string());
+    }
+
+    let id_clone = id.clone();
+    let db_path_clone = db_path.clone();
+    let job_dir_clone = job_dir.clone();
+
+    tokio::spawn(async move {
+        let mut regen_record = match load_record(&db_path_clone, &id_clone) {
+            Ok(record) => record,
+            Err(_) => return,
+        };
+
+        if let Err(error) = gradio::ensure_server_ready().await {
+            for (index, _) in &queued_segments {
+                let _ = set_segment_failure(&mut regen_record, *index, error.clone());
+            }
+            finalize_record(&mut regen_record, &job_dir_clone);
+            update_record_if_active(&db_path_clone, &id_clone, regen_record);
+            return;
+        }
+
+        for (index, segment_text) in queued_segments {
+            if is_record_deleted(&id_clone) {
+                return;
+            }
+            match gradio::generate_single(&segment_text, &prompt_path, &emotion_path, emo_weight)
+                .await
+            {
+                Ok(output_path) => {
+                    if is_record_deleted(&id_clone) {
+                        let _ = remove_file_if_exists(Path::new(&output_path));
+                        return;
+                    }
+                    let dest_path = segment_output_path(&job_dir_clone, index);
+                    match move_generated_file(&output_path, &dest_path) {
+                        Ok(absolute_dest_path) => {
+                            let _ =
+                                set_segment_success(&mut regen_record, index, absolute_dest_path);
+                        }
+                        Err(error) => {
+                            let _ = set_segment_failure(&mut regen_record, index, error);
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = set_segment_failure(
+                        &mut regen_record,
+                        index,
+                        format!("Gradio Error on segment {}: {}", index, error),
+                    );
+                }
+            }
+
+            finalize_record(&mut regen_record, &job_dir_clone);
+            if !update_record_if_active(&db_path_clone, &id_clone, regen_record.clone()) {
+                return;
+            }
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_segment(app_handle: AppHandle, id: String, index: usize) -> Result<(), String> {
+    let db_path = history_db_path(&app_handle)?;
+    migrate_legacy_storage(&app_handle, &db_path)?;
+
+    let mut record = load_record(&db_path, &id)?;
+    if record.status == "processing" {
+        return Err("当前任务还在生成中，暂时不能删除句子。".to_string());
+    }
+    if record.segments.len() <= 1 {
+        return Err("至少保留一句。若不需要该任务，请删除整条历史记录。".to_string());
+    }
+
+    let job_dir = infer_job_dir(&record)
+        .or_else(|| record.job_dir.as_ref().map(PathBuf::from))
+        .ok_or_else(|| "无法定位该任务的音频目录。".to_string())?;
+
+    let segment_position = record
+        .segments
+        .iter()
+        .position(|segment| segment.index == index)
+        .ok_or_else(|| format!("Segment {} not found", index))?;
+
+    let removed = record.segments.remove(segment_position);
+    if !removed.path.is_empty() {
+        let path = PathBuf::from(&removed.path);
+        if path.exists() {
+            let _ = remove_file_if_exists(&path);
+        }
+    }
+
+    renumber_segments_and_files(&mut record, &job_dir)?;
+    invalidate_merged_artifacts(&mut record, &job_dir);
+    sync_record_text(&mut record);
+    finalize_record(&mut record, &job_dir);
+    if !update_record_if_active(&db_path, &id, record) {
+        return Err("该任务已被删除。".to_string());
+    }
     Ok(())
 }
 
@@ -719,7 +1013,9 @@ async fn update_segment_text(
 
     record.segments[segment_position].text = next_text.to_string();
     queue_segment_for_regeneration(&mut record, &job_dir, index)?;
-    update_record(&db_path, &id, record);
+    if !update_record_if_active(&db_path, &id, record) {
+        return Err("该任务已被删除。".to_string());
+    }
     Ok(())
 }
 
@@ -756,7 +1052,9 @@ async fn update_segment_pause(
 
     invalidate_merged_artifacts(&mut record, &job_dir);
     finalize_record(&mut record, &job_dir);
-    update_record(&db_path, &id, record);
+    if !update_record_if_active(&db_path, &id, record) {
+        return Err("该任务已被删除。".to_string());
+    }
     Ok(())
 }
 
@@ -764,6 +1062,7 @@ async fn update_segment_pause(
 async fn delete_history(app_handle: AppHandle, id: String) -> Result<(), String> {
     let db_path = history_db_path(&app_handle)?;
     migrate_legacy_storage(&app_handle, &db_path)?;
+    mark_record_deleted(&id);
 
     // Also delete from legacy DB so migration never re-imports this record
     let legacy_db_path = legacy_history_db_path();
@@ -813,7 +1112,7 @@ async fn extract_video_audio(app_handle: AppHandle, video_path: String) -> Resul
             .unwrap()
             .as_millis()
     ));
-    let out_path_str = out_path.to_str().unwrap().to_string();
+    let out_path_str = out_path.to_string_lossy().into_owned();
 
     ffmpeg::extract_audio(&video_path, &out_path_str)
         .map_err(|e| format!("FFmpeg Error: {}", e))?;
@@ -843,11 +1142,13 @@ async fn remerge_record(app_handle: AppHandle, id: String) -> Result<(), String>
         Err(error) => {
             record.status = "failed".to_string();
             record.error = Some(error.clone());
-            update_record(&db_path, &id, record);
+            update_record_if_active(&db_path, &id, record);
             return Err(error);
         }
     }
-    update_record(&db_path, &id, record);
+    if !update_record_if_active(&db_path, &id, record) {
+        return Err("该任务已被删除。".to_string());
+    }
     Ok(())
 }
 
@@ -877,6 +1178,14 @@ async fn export_audio(source_path: String, destination_path: String) -> Result<(
     if source == destination {
         return Ok(());
     }
+
+    remove_file_if_exists(&destination).map_err(|e| {
+        format!(
+            "Failed to replace existing export {}: {}",
+            destination.display(),
+            e
+        )
+    })?;
 
     fs::copy(&source, &destination).map_err(|e| {
         format!(
@@ -909,7 +1218,7 @@ async fn audio_to_video(
             .unwrap()
             .as_millis()
     ));
-    let out_path_str = out_path.to_str().unwrap().to_string();
+    let out_path_str = out_path.to_string_lossy().into_owned();
 
     ffmpeg::audio_to_video(&audio_path, &image_path, &out_path_str)
         .map_err(|e| format!("FFmpeg Error: {}", e))?;
@@ -927,7 +1236,7 @@ async fn extract_subtitles(app_handle: AppHandle, video_path: String) -> Result<
             .unwrap()
             .as_millis()
     ));
-    let out_path_str = out_path.to_str().unwrap().to_string();
+    let out_path_str = out_path.to_string_lossy().into_owned();
 
     ffmpeg::extract_subtitles(&video_path, &out_path_str)
         .map_err(|e| format!("FFmpeg Error: {}", e))?;
@@ -952,6 +1261,8 @@ pub fn run() {
             get_history,
             generate_tts,
             retry_segment,
+            regenerate_queued_segments,
+            delete_segment,
             update_segment_text,
             update_segment_pause,
             delete_history,
